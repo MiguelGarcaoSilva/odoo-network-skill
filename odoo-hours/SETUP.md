@@ -8,7 +8,10 @@
    ```
 
    If the server hosts several databases, the script says so and asks for a
-   second line, `ODOO_DB=<name>`. Times follow the computer's time zone; add
+   second line, `ODOO_DB=<name>`. After an Odoo upgrade the data often moves
+   to a database with a new name and the old one stops loading (the script
+   then fails with a database or Postgres error): ask whoever runs your Odoo
+   for the new name and update `ODOO_DB`. Times follow the computer's time zone; add
    `ODOO_TZ=<zone>` (e.g. `Europe/Paris`) to override it, which Windows
    needs. Environment variables of the same names also work and take
    precedence.
