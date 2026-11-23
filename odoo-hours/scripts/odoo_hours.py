@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """Log and read your hours in Odoo (Network Management timesheet model).
 
-Stdlib only. Times on the command line are local (ODOO_TZ, else the computer's zone); Odoo stores UTC.
+Stdlib only. Talks to Odoo's JSON-2 API (Odoo 19 or later). Times on the command line are
+local (ODOO_TZ, else the computer's zone); Odoo stores UTC.
 
 Configuration, from the environment or from ~/.config/odoo-hours/config (KEY=value lines):
   ODOO_URL      your Odoo address, e.g. https://erp.example.com   (required)
-  ODOO_DB       the database name; only needed when the server has more than one
+  ODOO_DB       the database name; only needed when the server does not pick one by itself
   ODOO_TZ       your time zone, e.g. Europe/Paris; default the computer's (required on Windows)
-  ODOO_LOGIN    your Odoo login (e-mail)
   ODOO_API_KEY  your API key
-      macOS: both can come from the keychain item `odoo-api-key` instead
+      macOS: it can come from the keychain item `odoo-api-key` instead
              (security add-generic-password -a <your e-mail> -s odoo-api-key -w <key> -U)
-      Linux / Windows: put them in the config file and chmod 600 it
+      Linux / Windows: put it in the config file and chmod 600 it
 
 Needs Python 3.9+; on Windows also `pip install tzdata` for the time zone.
 
@@ -29,11 +29,12 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import os
-import re
 import subprocess
 import sys
-import xmlrpc.client
+import urllib.error
+import urllib.request
 from zoneinfo import ZoneInfo
 
 CONFIG = os.path.expanduser("~/.config/odoo-hours/config")
@@ -56,23 +57,7 @@ def setting(name: str, default: str = "") -> str:
 URL = setting("ODOO_URL").rstrip("/")
 if not URL:
     sys.exit(f"set ODOO_URL (your Odoo address), in the environment or as a KEY=value line in {CONFIG}")
-
-
-def database() -> str:
-    """ODOO_DB if set; else the server's only database; else ask for ODOO_DB."""
-    db = setting("ODOO_DB")
-    if db:
-        return db
-    try:
-        names = xmlrpc.client.ServerProxy(f"{URL}/xmlrpc/2/db").list()
-    except Exception as e:  # noqa: BLE001 - any transport or server error reads the same to the user
-        sys.exit(f"cannot list databases at {URL} ({e}); set ODOO_DB")
-    if len(names) == 1:
-        return names[0]
-    sys.exit(f"{URL} serves several databases, set ODOO_DB to one of: {', '.join(names) or 'none listed'}")
-
-
-DB = database()
+DB = setting("ODOO_DB")  # empty: the server picks its database
 
 
 def local_zone() -> ZoneInfo:
@@ -91,43 +76,52 @@ ENTRY_FIELDS = ["start_time", "end_time", "duration_h", "contract", "work_descri
 
 
 # ---------------------------------------------------------------- connection
-def credentials() -> tuple[str, str]:
-    """(login, api_key): environment, else the macOS keychain item, else the config file."""
-    login = os.environ.get("ODOO_LOGIN", "").strip()
+def api_key() -> str:
+    """The API key: environment, else the macOS keychain item, else the config file."""
     key = os.environ.get("ODOO_API_KEY", "").strip()
-    if (not key or not login) and sys.platform == "darwin":
+    if not key and sys.platform == "darwin":
         try:
-            meta = subprocess.run(["security", "find-generic-password", "-s", "odoo-api-key"],
-                                  capture_output=True, text=True, check=True).stdout
-            pw = subprocess.run(["security", "find-generic-password", "-s", "odoo-api-key", "-w"],
-                                capture_output=True, text=True, check=True).stdout.strip()
-            m = re.search(r'"acct"<blob>="([^"]+)"', meta)
-            login = login or (m.group(1) if m else "")
-            key = key or pw
+            key = subprocess.run(["security", "find-generic-password", "-s", "odoo-api-key", "-w"],
+                                 capture_output=True, text=True, check=True).stdout.strip()
         except (subprocess.CalledProcessError, FileNotFoundError):
             pass
-    if not key or not login:
-        login = login or setting("ODOO_LOGIN")
-        key = key or setting("ODOO_API_KEY")
+    if not key:
+        key = setting("ODOO_API_KEY")
         if key and os.path.exists(CONFIG) and os.name != "nt" and os.stat(CONFIG).st_mode & 0o077:
             print(f"warning: {CONFIG} holds your API key and is readable by others; chmod 600 it", file=sys.stderr)
-    if not key or not login:
-        sys.exit("no credentials: set ODOO_LOGIN and ODOO_API_KEY in the environment, or\n"
+    if not key:
+        sys.exit("no API key: set ODOO_API_KEY in the environment, or\n"
                  f"  macOS:  security add-generic-password -a <your e-mail> -s odoo-api-key -w <key> -U\n"
-                 f"  other:  ODOO_LOGIN=... and ODOO_API_KEY=... lines in {CONFIG} (chmod 600)")
-    return login, key
+                 f"  other:  an ODOO_API_KEY=... line in {CONFIG} (chmod 600)")
+    return key
+
+
+class OdooError(Exception):
+    pass
 
 
 class Odoo:
     def __init__(self) -> None:
-        self.login, self.key = credentials()
-        self.uid = xmlrpc.client.ServerProxy(f"{URL}/xmlrpc/2/common").authenticate(DB, self.login, self.key, {})
-        if not self.uid:
-            sys.exit(f"Odoo refused the API key for {self.login} (revoked or expired?)")
-        self._obj = xmlrpc.client.ServerProxy(f"{URL}/xmlrpc/2/object")
+        self.headers = {"Authorization": f"bearer {api_key()}", "Content-Type": "application/json"}
+        if DB:
+            self.headers["X-Odoo-Database"] = DB
+        self.uid = self.call("res.users", "context_get")["uid"]
 
-    def call(self, model: str, method: str, *args, **kw):
-        return self._obj.execute_kw(DB, self.uid, self.key, model, method, list(args), kw)
+    def call(self, model: str, method: str, **params):
+        """POST /json/2/<model>/<method>; every argument is named (record ids go as `ids`)."""
+        req = urllib.request.Request(f"{URL}/json/2/{model}/{method}", data=json.dumps(params).encode(),
+                                     headers=self.headers)
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            try:
+                msg = json.load(e).get("message", "")
+            except ValueError:
+                msg = ""
+            if e.code == 401:
+                sys.exit(f"Odoo refused the API key (revoked or expired?): {msg or e.reason}")
+            raise OdooError(f"{e.code} {msg or e.reason}") from None
 
 
 # ---------------------------------------------------------------- time helpers
@@ -161,8 +155,8 @@ def active_contracts(o: Odoo, on: dt.date | None = None) -> list[dict]:
     on = on or dt.date.today()
     rows = o.call(
         "contract", "search_read",
-        [["network_member.user", "=", o.uid], ["active", "=", True],
-         ["start_date", "<=", on.isoformat()], ["end_date", ">=", on.isoformat()]],
+        domain=[["network_member.user", "=", o.uid], ["active", "=", True],
+                ["start_date", "<=", on.isoformat()], ["end_date", ">=", on.isoformat()]],
         fields=["account", "project", "job_role", "start_date", "end_date", "monthly_hours", "maximum_daily_hours"],
         order="start_date desc",
     )
@@ -197,7 +191,7 @@ def entries_between(o: Odoo, start: dt.date, end: dt.date) -> list[dict]:
     hi = odoo_str(to_utc(end + dt.timedelta(days=1), "00:00"))
     return o.call(
         "timesheet_entry", "search_read",
-        [["network_member_user_id", "=", o.uid], ["start_time", ">=", lo], ["start_time", "<", hi]],
+        domain=[["network_member_user_id", "=", o.uid], ["start_time", ">=", lo], ["start_time", "<", hi]],
         fields=ENTRY_FIELDS, order="start_time asc",
     )
 
@@ -282,17 +276,17 @@ def cmd_add(o: Odoo, a) -> None:
         print(f"warning: {day_total:.2f} h on {day} exceeds the contract's {contract['maximum_daily_hours']:g} h/day")
     if a.dry_run:
         return
-    new = o.call("timesheet_entry", "create", {
+    [new] = o.call("timesheet_entry", "create", vals_list=[{
         "contract": contract["id"], "work_description": a.desc,
         "start_time": odoo_str(start), "end_time": odoo_str(end),
-    })
-    back = o.call("timesheet_entry", "read", [new], fields=ENTRY_FIELDS)[0]
+    }])
+    back = o.call("timesheet_entry", "read", ids=[new], fields=ENTRY_FIELDS)[0]
     print(f"created {new}: {back['duration_h']:.2f} h on {back['account'][1] if back['account'] else '?'} / "
           f"{back['project'][1] if back['project'] else '?'}")
 
 
 def cmd_update(o: Odoo, a) -> None:
-    before = o.call("timesheet_entry", "read", [a.id], fields=ENTRY_FIELDS)[0]
+    before = o.call("timesheet_entry", "read", ids=[a.id], fields=ENTRY_FIELDS)[0]
     day = from_odoo(before["start_time"]).date()
     vals: dict = {}
     if a.desc is not None:
@@ -308,14 +302,14 @@ def cmd_update(o: Odoo, a) -> None:
     print("before:"); print_entries([before])
     if a.dry_run:
         print("DRY RUN would write", vals); return
-    o.call("timesheet_entry", "write", [a.id], vals)
-    print("after:"); print_entries(o.call("timesheet_entry", "read", [a.id], fields=ENTRY_FIELDS))
+    o.call("timesheet_entry", "write", ids=[a.id], values=vals)  # this model names it `values`
+    print("after:"); print_entries(o.call("timesheet_entry", "read", ids=[a.id], fields=ENTRY_FIELDS))
 
 
 def cmd_delete(o: Odoo, a) -> None:
-    rows = o.call("timesheet_entry", "read", a.ids, fields=ENTRY_FIELDS)
+    rows = o.call("timesheet_entry", "read", ids=a.ids, fields=ENTRY_FIELDS)
     print_entries(rows)
-    o.call("timesheet_entry", "unlink", a.ids)
+    o.call("timesheet_entry", "unlink", ids=a.ids)
     print(f"deleted {len(rows)}")
 
 
@@ -355,8 +349,8 @@ def main(argv: list[str] | None = None) -> None:
     a = p.parse_args(argv)
     try:
         a.fn(Odoo(), a)
-    except xmlrpc.client.Fault as e:
-        sys.exit("Odoo error: " + e.faultString.strip().splitlines()[-1])
+    except OdooError as e:
+        sys.exit(f"Odoo error: {e}")
     except OSError as e:
         sys.exit(f"cannot reach {URL}: {e}")
 

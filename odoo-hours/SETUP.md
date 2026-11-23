@@ -7,11 +7,11 @@
    ODOO_URL=https://erp.example.com
    ```
 
-   If the server hosts several databases, the script says so and asks for a
-   second line, `ODOO_DB=<name>`. After an Odoo upgrade the data often moves
-   to a database with a new name and the old one stops loading (the script
-   then fails with a database or Postgres error): ask whoever runs your Odoo
-   for the new name and update `ODOO_DB`. Times follow the computer's time zone; add
+   The server normally picks its database by itself. Only if it does not
+   (an error about the database), ask whoever runs your Odoo for its name
+   and add a second line, `ODOO_DB=<name>`. Leave it out otherwise: after an
+   Odoo upgrade the data can move to a database with a new name, and a fixed
+   name then points at the old one. Times follow the computer's time zone; add
    `ODOO_TZ=<zone>` (e.g. `Europe/Paris`) to override it, which Windows
    needs. Environment variables of the same names also work and take
    precedence.
@@ -39,11 +39,10 @@
    security add-generic-password -a you@example.com -s odoo-api-key -w '<key>' -U
    ```
 
-   On Linux or Windows, add two lines to the config file from step 1,
-   `ODOO_LOGIN=you@example.com` and `ODOO_API_KEY=<key>`, and make it
-   readable only by you: `chmod 600 ~/.config/odoo-hours/config` (the script
-   warns if it is not). `ODOO_LOGIN` and `ODOO_API_KEY` in the environment
-   work everywhere and take precedence. Keep the key out of chats and repos.
+   On Linux or Windows, add a line `ODOO_API_KEY=<key>` to the config file
+   from step 1 and make it readable only by you:
+   `chmod 600 ~/.config/odoo-hours/config` (the script warns if it is not).
+   `ODOO_API_KEY` in the environment works everywhere and takes precedence. Keep the key out of chats and repos.
 
 5. **Check.** `python3 ~/.claude/skills/odoo-hours/scripts/odoo_hours.py contracts`
    prints your active contracts. The first run may ask macOS to let `python3`

@@ -4,10 +4,10 @@ A Claude Code skill that logs your hours in Odoo from the terminal: the
 right contract, the times you say, and a work description drafted from your
 day's git history. It also reads what you logged and fixes it.
 
-The Odoo installs this was built on (15.0, then 19.0) serve no MCP endpoint,
-so the skill talks to Odoo's XML-RPC API with a personal API key. Odoo 19
-marks XML-RPC as deprecated; a later release may need a move to its JSON-2
-API. Stdlib Python 3.9+, nothing to install (Windows needs `pip install tzdata` for the time zone). Runs on
+The Odoo installs this was built on serve no MCP endpoint, so the skill
+talks to Odoo's JSON-2 API with a personal API key. It needs **Odoo 19 or
+later**; for an older Odoo, use the tag `xmlrpc`, the last version over
+XML-RPC. Stdlib Python 3.9+, nothing to install (Windows needs `pip install tzdata` for the time zone). Runs on
 macOS, Linux and Windows; only where the key is stored differs.
 
 **Compatibility.** The script writes the `timesheet_entry` model of the

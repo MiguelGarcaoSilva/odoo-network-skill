@@ -8,7 +8,7 @@ allowed-tools: Bash(python3:*), Bash(git log:*), Bash(security add-generic-passw
 
 Hours are rows of the `timesheet_entry` model of Odoo's Network Management
 app (not the standard Timesheets app). `scripts/odoo_hours.py` talks to the
-Odoo named in `~/.config/odoo-hours/config` over XML-RPC with the user's API
+Odoo named in `~/.config/odoo-hours/config` over the JSON-2 API with the user's API
 key.
 
 ```bash
