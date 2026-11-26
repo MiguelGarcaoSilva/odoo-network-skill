@@ -31,6 +31,11 @@
      → **Account Security** → **New API Key**. Confirm with your Odoo
      password, name the key (for example `claude-code`), click **Generate
      key**, and copy it now: Odoo shows it only once.
+   - **Give it an expiry.** When the dialog asks for a duration, pick one to
+     three months rather than a key that never expires. The agent can read
+     the key and reads content you do not control (downloads, web pages), so
+     a leaked key should stop working on its own. When it expires, Odoo
+     refuses it and the agent walks you through steps 3 and 4 again.
 
 4. **Store it.** On macOS, in the keychain, with your Odoo login as the
    account:
