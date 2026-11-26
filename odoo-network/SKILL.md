@@ -1,31 +1,38 @@
 ---
-name: odoo-hours
-description: Odoo hours, the user's timesheet in Odoo. Log or fill hours on the right contract with descriptions drawn from the day's git history; read how many hours a contract has or is missing; correct or delete entries. Use whenever the user mentions Odoo, logging hours or the timesheet.
+name: odoo-network
+description: The user's side of Odoo's Network Management app. Hours - log or fill timesheet entries on the right contract with descriptions drawn from the day's git history, read how many hours a contract has or is missing, correct or delete entries. Refunds - submit an expense for the company to pay back, with its receipt attached, and follow its state. Use whenever the user mentions Odoo, logging hours, the timesheet, an expense, a receipt to claim or a refund request.
 allowed-tools: Bash(python3:*), Bash(git log:*), Bash(security add-generic-password:*)
 ---
 
-# Odoo hours
+# Odoo Network
 
-Hours are rows of the `timesheet_entry` model of Odoo's Network Management
-app (not the standard Timesheets app). `scripts/odoo_hours.py` talks to the
-Odoo named in `~/.config/odoo-hours/config` over the JSON-2 API with the user's API
-key.
+Two models of Odoo's Network Management app (not the standard Timesheets or
+Expenses apps): hours are rows of `timesheet_entry`, expenses are rows of
+`refund_request`. `scripts/odoo_network.py` talks to the Odoo named in
+`~/.config/odoo-network/config` over the JSON-2 API with the user's API key.
 
 ```bash
-H=~/.claude/skills/odoo-hours/scripts/odoo_hours.py
-python3 $H contracts                      # active contracts and their monthly hours
-python3 $H list [--from D --to D]         # entries, default this week
-python3 $H month [--month YYYY-MM]        # hours per contract against its figures
-python3 $H update <id> --desc "..." --dry-run   # also --contract, --start, --end
-python3 $H add --contract acme --date 2026-10-28 --start 09:00 --end 12:00 --desc "Search results page" --dry-run
-python3 $H delete <id>
+O=~/.claude/skills/odoo-network/scripts/odoo_network.py
+# hours
+python3 $O contracts                      # active contracts and their monthly hours
+python3 $O list [--from D --to D]         # entries, default this week
+python3 $O month [--month YYYY-MM]        # hours per contract against its figures
+python3 $O update <id> --desc "..." --dry-run   # also --contract, --start, --end
+python3 $O add --contract acme --date 2026-10-28 --start 09:00 --end 12:00 --desc "Search results page" --dry-run
+python3 $O delete <id>
+# refunds
+python3 $O refunds [--from D --to D]      # your requests and their state
+python3 $O refund-options [--search TEXT] # approvers, and cost centers matching TEXT
+python3 $O refund --date 2026-11-26 --amount 36.80 --cost-center workshop --approver marta --desc "..." --file ~/Downloads/receipt.pdf --dry-run
+python3 $O refund-file <id> ~/Downloads/receipt.pdf   # attach the receipt to a Draft request
 ```
 
 Times on the command line are **local** (`ODOO_TZ`, else the computer's time
 zone); the script converts to UTC, so pass them as the user says them.
 `--contract` takes an id or a substring of the account, project or role of a
-contract active on that date; the script refuses anything ambiguous and
-prints the candidates.
+contract active on that date; `--cost-center` and `--approver` take an id or
+a substring of the name. The script refuses anything ambiguous and prints the
+candidates.
 
 When the script is not configured yet, or Odoo refuses the key (revoked or
 expired), walk the user through [SETUP.md](SETUP.md); the new key comes from
@@ -84,6 +91,41 @@ there is more than one contract.
    every row with a readable description, no placeholder left, and the user
    has seen that list.
 
+## Refund requests
+
+An expense the user paid for the company goes back to them through a refund
+request. Its path: **Draft** (no receipt yet) → **Waiting for Expense
+Approval** (the approver says yes or no) → **Waiting for Official Document
+Approval** (finance checks the receipt) → waiting to be set for payment →
+**Waiting for Payment** → **Paid**, or **Refused** at either check. A refused
+request can be corrected and its receipt replaced.
+
+1. **The receipt.** Read the file the user points at (PDF or image; the form
+   takes `.pdf`, `.jpg`, `.jpeg`, `.png`). Take the date, the total and the
+   supplier. Finance refuses a receipt whose date, supplier details with VAT
+   number, or QR code are not visible, or that is unreadable: say so before
+   submitting.
+2. **The amount** is what the user paid, VAT included, in euros. For a
+   receipt in another currency, ask what the card charged in euros; do not
+   convert at a rate you looked up.
+3. **Cost center and approver.** `refund-options --search <word>` lists the
+   approvers and the cost centers; a cost center is the project the expense
+   belongs to. Take them from "Your rules" or ask. Only the approvers that
+   `refund-options` lists can be picked.
+4. **Description.** What was bought, the period it covers, and what it was
+   for, in a line finance understands: "GitHub Copilot subscription, 26 Nov to
+   16 Dec, for the AI training workshop".
+5. **Plan, confirm, submit.** Run `refund ... --dry-run` and show the line:
+   date, amount, cost center, approver, bank account, receipt, description.
+   This asks the company for money; wait for the user's ok, then run it
+   without `--dry-run`. With `--file`, the request goes straight to the
+   approver; without it, it stays in Draft until `refund-file` attaches the
+   receipt. Done when `refunds` shows the request in its new state and the
+   user has seen it.
+
+"Where is my refund / what have I claimed" is `refunds`; it shows each
+request's state and the payment date, paid or expected.
+
 ## Your rules (edit this section; it is yours)
 
 Everything above is the same for everyone. What differs per person lives
@@ -105,6 +147,8 @@ here, and the agent reads it as fact. Replace the examples.
 
 - **Description register.** `Plain English, 3–8 words.` Or point at a past
   week: `list --from ... --to ...` shows it.
+- **Refunds.** `Bank account: personal. Approver: <name>. Cost center:
+  the project of the work, e.g. "client a" for client A travel.`
 - **Exceptions.** Anything the agent should ask about instead of fixing on
   its own, for example: `Rows on future dates are placeholders I keep on
   purpose; leave them. A month that does not match the target may be

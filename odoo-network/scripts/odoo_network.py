@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Log and read your hours in Odoo (Network Management timesheet model).
+"""Your side of Odoo's Network Management app: hours (timesheet entries) and refund requests.
 
 Stdlib only. Talks to Odoo's JSON-2 API (Odoo 19 or later). Times on the command line are
 local (ODOO_TZ, else the computer's zone); Odoo stores UTC.
 
-Configuration, from the environment or from ~/.config/odoo-hours/config (KEY=value lines):
+Configuration, from the environment or from ~/.config/odoo-network/config (KEY=value lines;
+the old ~/.config/odoo-hours/config still works):
   ODOO_URL      your Odoo address, e.g. https://erp.example.com   (required)
   ODOO_DB       the database name; only needed when the server does not pick one by itself
   ODOO_TZ       your time zone, e.g. Europe/Paris; default the computer's (required on Windows)
@@ -22,12 +23,22 @@ Needs Python 3.9+; on Windows also `pip install tzdata` for the time zone.
   update ID [--desc TEXT] [--contract C] [--start HH:MM] [--end HH:MM] [--dry-run]
   delete ID [ID ...]
 
+Refund requests (expenses the company pays back):
+  refunds [--from D] [--to D]    your refund requests and their state (default: all)
+  refund-options [--search TEXT] the approvers, and the active cost centers matching TEXT
+  refund --date D --amount EUR --cost-center C --approver A --desc TEXT [--file PATH]
+         [--account personal|company] [--dry-run]
+                                 submit one request; without --file it stays in Draft
+  refund-file ID PATH [--dry-run] attach the document to a request still in Draft or Refused
+
 `--contract` takes an id or a substring of the account / project / role of an
 active contract (e.g. "acme"). One call = one entry, so a wrong line is one line.
+`--cost-center` and `--approver` take an id or a substring of the name, the same way.
 """
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as dt
 import json
 import os
@@ -37,11 +48,13 @@ import urllib.error
 import urllib.request
 from zoneinfo import ZoneInfo
 
-CONFIG = os.path.expanduser("~/.config/odoo-hours/config")
+CONFIG = os.path.expanduser("~/.config/odoo-network/config")
+if not os.path.exists(CONFIG) and os.path.exists(os.path.expanduser("~/.config/odoo-hours/config")):
+    CONFIG = os.path.expanduser("~/.config/odoo-hours/config")  # the name before the rename
 
 
 def setting(name: str, default: str = "") -> str:
-    """ODOO_* from the environment, else from ~/.config/odoo-hours/config (KEY=value lines)."""
+    """ODOO_* from the environment, else from the config file (KEY=value lines)."""
     if os.environ.get(name, "").strip():
         return os.environ[name].strip()
     try:
@@ -313,6 +326,124 @@ def cmd_delete(o: Odoo, a) -> None:
     print(f"deleted {len(rows)}")
 
 
+# ---------------------------------------------------------------- refund requests
+# `refund_request` of the same app. The web form cannot create one: its "New" opens
+# `refund_request_wizard`, and the wizard's `action_submit` makes the request. With a
+# document it goes to the approver; without one it stays in Draft.
+REFUND_FIELDS = ["reference", "document_date", "gross_total", "currency_id", "cost_center", "approver",
+                 "expense_description", "payment_bank_account_type", "state", "file_name",
+                 "estimated_payment_date", "payment_date"]
+DOC_TYPES = (".pdf", ".jpg", ".jpeg", ".png")  # what the form accepts
+
+
+def pick(rows: list[dict], spec: str, kind: str) -> dict:
+    """One row by id, exact name, or a unique substring of display_name; else list the candidates."""
+    if spec.isdigit():
+        hits = [r for r in rows if r["id"] == int(spec)]
+    else:
+        s = spec.lower()
+        hits = [r for r in rows if r["display_name"].lower() == s] or \
+               [r for r in rows if s in r["display_name"].lower()]
+    if len(hits) == 1:
+        return hits[0]
+    shown = hits or rows
+    names = "\n".join(f"  {r['id']}  {r['display_name']}" for r in shown[:40])
+    more = f"\n  ... {len(shown) - 40} more" if len(shown) > 40 else ""
+    sys.exit(f"{'ambiguous' if hits else 'no'} {kind} matching {spec!r}. Candidates:\n{names}{more}")
+
+
+def cost_centers(o: Odoo) -> list[dict]:
+    return o.call("project", "search_read", domain=[["active", "=", True]],
+                  fields=["display_name", "account_name"], order="name asc")
+
+
+def approvers(o: Odoo) -> list[dict]:
+    return o.call("refund_request_approver", "search_read", domain=[], fields=["display_name"])
+
+
+def read_doc(path: str) -> tuple[str, str]:
+    """(file name, base64 content) of a receipt the form would accept."""
+    path = os.path.expanduser(path)
+    if not path.lower().endswith(DOC_TYPES):
+        sys.exit(f"{path}: the form takes {', '.join(DOC_TYPES)} only")
+    with open(path, "rb") as f:
+        return os.path.basename(path), base64.b64encode(f.read()).decode()
+
+
+def print_refunds(rows: list[dict]) -> None:
+    for r in rows:
+        name = lambda f: r[f][1] if r[f] else "-"
+        due = r["payment_date"] or r["estimated_payment_date"]
+        print(f"{r['id']}  {r['reference']}  {r['document_date']}  {r['gross_total']:8.2f} {name('currency_id')}  "
+              f"{r['state']}  | {name('cost_center')}  | approver {name('approver')}  | "
+              f"{r['file_name'] or 'no document'}{f'  | paid/due {due}' if due else ''}"
+              f"  | {(r['expense_description'] or '').strip()}")
+
+
+def cmd_refunds(o: Odoo, a) -> None:
+    dom: list = [["network_member_user_id", "=", o.uid]]
+    if a.frm:
+        dom.append(["document_date", ">=", parse_date(a.frm).isoformat()])
+    if a.to:
+        dom.append(["document_date", "<=", parse_date(a.to).isoformat()])
+    rows = o.call("refund_request", "search_read", domain=dom, fields=REFUND_FIELDS, order="id desc")
+    print_refunds(rows)
+    print(f"{len(rows)} requests, {sum(r['gross_total'] for r in rows):.2f} total")
+
+
+def cmd_refund_options(o: Odoo, a) -> None:
+    print("approvers:")
+    for r in approvers(o):
+        print(f"  {r['id']}  {r['display_name']}")
+    s = (a.search or "").lower()
+    print("cost centers" + (f" matching {a.search!r}" if s else "") + ":")
+    for r in cost_centers(o):
+        if s in (r["display_name"] + " " + (r["account_name"] or "")).lower():
+            print(f"  {r['id']}  {r['display_name']}  | {r['account_name'] or '-'}")
+
+
+def cmd_refund(o: Odoo, a) -> None:
+    day = parse_date(a.date)
+    if a.amount <= 0:
+        sys.exit("--amount must be positive")
+    cc = pick(cost_centers(o), a.cost_center, "cost center")
+    ap = pick(approvers(o), a.approver, "approver")
+    doc = read_doc(a.file) if a.file else None
+    print(("DRY RUN  " if a.dry_run else "SUBMIT   ") +
+          f"{day}  {a.amount:.2f}  | {cc['display_name']} ({cc['account_name'] or '-'})  | approver {ap['display_name']}"
+          f"  | {a.account} account  | {doc[0] if doc else 'no document: stays in Draft'}  | {a.desc}")
+    if a.dry_run:
+        return
+    me = o.call("refund_request_wizard", "default_get", fields=["network_member"])["network_member"]
+    vals = {"network_member": me, "document_date": day.isoformat(), "gross_total": a.amount,
+            "cost_center": cc["id"], "approver": ap["id"], "payment_bank_account_type": a.account,
+            "expense_description": a.desc}
+    if doc:
+        vals.update(file_name=doc[0], file=doc[1])
+    last = o.call("refund_request", "search_read", domain=[["network_member_user_id", "=", o.uid]],
+                  fields=["id"], order="id desc", limit=1)
+    [wiz] = o.call("refund_request_wizard", "create", vals_list=[vals])
+    o.call("refund_request_wizard", "action_submit", ids=[wiz])
+    new = o.call("refund_request", "search_read",
+                 domain=[["network_member_user_id", "=", o.uid], ["id", ">", last[0]["id"] if last else 0]],
+                 fields=REFUND_FIELDS, order="id desc")
+    if not new:
+        sys.exit("submitted, but no new request shows up; check Refund Requests in Odoo")
+    print("created:"); print_refunds(new)
+
+
+def cmd_refund_file(o: Odoo, a) -> None:
+    [r] = o.call("refund_request", "read", ids=[a.id], fields=REFUND_FIELDS)
+    if r["state"] not in ("draft", "refused"):
+        sys.exit(f"{r['reference']} is {r['state']}; the document can only change in draft or refused")
+    name, data = read_doc(a.path)
+    print("before:"); print_refunds([r])
+    if a.dry_run:
+        print(f"DRY RUN would attach {name}"); return
+    o.call("refund_request", "write", ids=[a.id], values={"file_name": name, "file": data})  # `values`, as above
+    print("after:"); print_refunds(o.call("refund_request", "read", ids=[a.id], fields=REFUND_FIELDS))
+
+
 # ---------------------------------------------------------------- main
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -345,6 +476,27 @@ def main(argv: list[str] | None = None) -> None:
 
     s = sub.add_parser("delete"); s.add_argument("ids", type=int, nargs="+")
     s.set_defaults(fn=cmd_delete)
+
+    s = sub.add_parser("refunds"); s.add_argument("--from", dest="frm"); s.add_argument("--to")
+    s.set_defaults(fn=cmd_refunds)
+
+    s = sub.add_parser("refund-options"); s.add_argument("--search", help="filter cost centers by name or account")
+    s.set_defaults(fn=cmd_refund_options)
+
+    s = sub.add_parser("refund")
+    s.add_argument("--date", required=True, help="the receipt's date: YYYY-MM-DD, today, yesterday")
+    s.add_argument("--amount", required=True, type=float, help="total to pay back, VAT included")
+    s.add_argument("--cost-center", required=True, help="id or substring of the cost center (a project)")
+    s.add_argument("--approver", required=True, help="id or substring of the approver's name")
+    s.add_argument("--desc", required=True, help="what the expense was")
+    s.add_argument("--file", help="the receipt (.pdf, .jpg, .jpeg, .png); without it the request stays in Draft")
+    s.add_argument("--account", choices=["personal", "company"], default="personal", help="bank account to pay into")
+    s.add_argument("--dry-run", action="store_true")
+    s.set_defaults(fn=cmd_refund)
+
+    s = sub.add_parser("refund-file"); s.add_argument("id", type=int); s.add_argument("path")
+    s.add_argument("--dry-run", action="store_true")
+    s.set_defaults(fn=cmd_refund_file)
 
     a = p.parse_args(argv)
     try:

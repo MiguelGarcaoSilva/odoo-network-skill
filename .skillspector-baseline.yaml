@@ -1,5 +1,5 @@
 # SkillSpector baseline: findings reviewed and accepted for this skill.
-# Scan with:  skillspector scan ./odoo-hours --no-llm --baseline .skillspector-baseline.yaml
+# Scan with:  skillspector scan ./odoo-network --no-llm --baseline .skillspector-baseline.yaml
 version: 2
 rules:
   - id: "PE3"

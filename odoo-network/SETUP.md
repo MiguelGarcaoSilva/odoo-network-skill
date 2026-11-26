@@ -1,6 +1,6 @@
-# Odoo hours: setup (once)
+# Odoo Network: setup (once)
 
-1. **Tell the script where Odoo is.** Create `~/.config/odoo-hours/config`
+1. **Tell the script where Odoo is.** Create `~/.config/odoo-network/config`
    with one line, the address you open in the browser:
 
    ```
@@ -41,10 +41,10 @@
 
    On Linux or Windows, add a line `ODOO_API_KEY=<key>` to the config file
    from step 1 and make it readable only by you:
-   `chmod 600 ~/.config/odoo-hours/config` (the script warns if it is not).
+   `chmod 600 ~/.config/odoo-network/config` (the script warns if it is not).
    `ODOO_API_KEY` in the environment works everywhere and takes precedence. Keep the key out of chats and repos.
 
-5. **Check.** `python3 ~/.claude/skills/odoo-hours/scripts/odoo_hours.py contracts`
+5. **Check.** `python3 ~/.claude/skills/odoo-network/scripts/odoo_network.py contracts`
    prints your active contracts. The first run may ask macOS to let `python3`
    read the keychain item; "Always allow" settles it.
 
